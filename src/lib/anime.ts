@@ -1,5 +1,9 @@
-// Custom backend deployed on Railway using anime-api/aniwatch routes
-const API_URL = "https://anime-api-production-7aea.up.railway.app/aniwatch";
+// API Configuration with Fallbacks
+const PRIMARY_API = "https://anime-api-production-7aea.up.railway.app/aniwatch";
+const FALLBACK_APIS = [
+  "https://api-anime-rouge.vercel.app/aniwatch",
+  "https://api.consumet.org/anime/gogoanime",
+];
 
 export interface Anime {
   id: string;
@@ -19,92 +23,114 @@ export interface Anime {
   genres: string[];
 }
 
-// 1. Fetch High-Quality Metadata from Aniwatch API (Railway)
-export async function getTrendingAnime(): Promise<Anime[]> {
+interface RawAnimeItem {
+  id: string | number;
+  name?: string;
+  title?: string;
+  poster?: string;
+  img?: string;
+  description?: string;
+  episodes?: number | { sub?: number };
+}
+
+// Helper to fetch from multiple instances if one fails or returns empty data
+async function fetchFromAPI(path: string, isSource: boolean = false) {
+  // Try primary Railway API first
   try {
-    const response = await fetch(`${API_URL}`, {
-      next: { revalidate: 3600 },
-    });
-    const data = await response.json();
-    
-    // Merge spotlight and trending for the home page display
-    const rawList = [...(data.spotLightAnimes || []), ...(data.trendingAnimes || [])];
-    
-    // Map properties to our standardized Anime interface
-    return rawList.map((item: Record<string, unknown>) => ({
-      id: String(item.id),
-      title: {
-        english: String(item.name),
-        romaji: String(item.name),
-      },
-      coverImage: {
-        extraLarge: String(item.poster || item.img || ""),
-        medium: String(item.poster || item.img || ""),
-      },
-      bannerImage: item.poster || item.img ? String(item.poster || item.img) : null,
-      description: item.description ? String(item.description) : "No description provided.",
-      episodes: Number((item.episodes as { sub?: number })?.sub || item.episodes || 0),
-      status: "Unknown",
-      genres: [],
-    }));
+    const url = `${PRIMARY_API}${path}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (isSource && (!data.sources || data.sources.length === 0)) {
+        console.warn(`Primary API returned empty sources for ${path}. Trying fallbacks...`);
+      } else {
+        return data;
+      }
+    }
   } catch (error) {
-    console.error("Error fetching trending anime:", error);
-    return [];
+    console.error(`Primary API failed:`, error);
   }
+
+  // Try fallbacks
+  for (const fallback of FALLBACK_APIS) {
+    try {
+      // Consumet Gogo uses /watch instead of /episode/srcs
+      let finalPath = path;
+      if (fallback.includes("gogoanime") && path.includes("/episode/srcs")) {
+        const episodeId = new URLSearchParams(path.split("?")[1]).get("id");
+        finalPath = `/watch/${episodeId}`;
+      }
+
+      const url = `${fallback}${finalPath}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        if (isSource && (!data.sources || data.sources.length === 0)) continue;
+        return data;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+// 1. Fetch High-Quality Metadata
+export async function getTrendingAnime(): Promise<Anime[]> {
+  const data = await fetchFromAPI("");
+  if (!data) return [];
+  
+  const rawList = [...(data.spotLightAnimes || []), ...(data.trendingAnimes || [])];
+  
+  return rawList.map((item: RawAnimeItem) => ({
+    id: String(item.id),
+    title: {
+      english: String(item.name || item.title || "Unknown"),
+      romaji: String(item.name || item.title || "Unknown"),
+    },
+    coverImage: {
+      extraLarge: String(item.poster || item.img || ""),
+      medium: String(item.poster || item.img || ""),
+    },
+    bannerImage: item.poster || item.img ? String(item.poster || item.img) : null,
+    description: item.description ? String(item.description) : "No description provided.",
+    episodes: Number(typeof item.episodes === "object" ? item.episodes?.sub : item.episodes || 0),
+    status: "Unknown",
+    genres: [],
+  }));
 }
 
 export async function getAnimeInfoAniList(id: string): Promise<Anime | null> {
-  try {
-    const response = await fetch(`${API_URL}/anime/${id}`, {
-      next: { revalidate: 3600 },
-    });
-    const item = await response.json();
-    
-    if (!item?.info) return null;
+  const item = await fetchFromAPI(`/anime/${id}`);
+  if (!item?.info) return null;
 
-    const info = item.info;
-    return {
-      id: info.id || id,
-      title: {
-        english: info.name,
-        romaji: info.name,
-      },
-      coverImage: {
-        extraLarge: info.img || info.poster || "",
-        medium: info.img || info.poster || "",
-      },
-      bannerImage: info.img || info.poster || null,
-      description: info.description || "No description provided.",
-      episodes: item.episodes?.length || 0,
-      status: info.stats?.status || "Unknown",
-      genres: [],
-    };
-  } catch (error) {
-    console.error("Error fetching anime info:", error);
-    return null;
-  }
+  const info = item.info;
+  return {
+    id: info.id || id,
+    title: {
+      english: info.name,
+      romaji: info.name,
+    },
+    coverImage: {
+      extraLarge: info.img || info.poster || "",
+      medium: info.img || info.poster || "",
+    },
+    bannerImage: info.img || info.poster || null,
+    description: info.description || "No description provided.",
+    episodes: item.episodes?.length || 0,
+    status: info.stats?.status || "Unknown",
+    genres: [],
+  };
 }
 
-// 2. Fetch Episodes using the Railway Custom API
+// 2. Fetch Episodes
 export async function getAnimeEpisodes(animeId: string) {
-  try {
-    const response = await fetch(`${API_URL}/episodes/${animeId}`);
-    const data = await response.json();
-    return data?.episodes || [];
-  } catch (error) {
-    console.error("Error fetching episodes:", error);
-    return [];
-  }
+  const data = await fetchFromAPI(`/episodes/${animeId}`);
+  return data?.episodes || [];
 }
 
-// 3. Fetch .m3u8 Stream link using Railway Custom API
+// 3. Fetch .m3u8 Stream link
 export async function getEpisodeStreamingLinks(episodeId: string) {
-  try {
-    const response = await fetch(`${API_URL}/episode/srcs?id=${episodeId}&server=vidstreaming&category=sub`);
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    console.error("Error fetching streaming links:", error);
-    return null;
-  }
+  const data = await fetchFromAPI(`/episode/srcs?id=${episodeId}&server=vidstreaming&category=sub`, true);
+  return data;
 }
