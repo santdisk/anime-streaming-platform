@@ -134,3 +134,29 @@ export async function getEpisodeStreamingLinks(episodeId: string) {
   const data = await fetchFromAPI(`/episode/srcs?id=${episodeId}&server=vidstreaming&category=sub`, true);
   return data;
 }
+
+// 4. Search Anime
+export async function searchAnime(query: string): Promise<Anime[]> {
+  const data = await fetchFromAPI(`/search?q=${encodeURIComponent(query)}`);
+  if (!data) return [];
+
+  // AniWatch search returns { animes: [...] }
+  const rawList = data.animes || data.results || [];
+
+  return rawList.map((item: RawAnimeItem) => ({
+    id: String(item.id),
+    title: {
+      english: String(item.name || item.title || "Unknown"),
+      romaji: String(item.name || item.title || "Unknown"),
+    },
+    coverImage: {
+      extraLarge: String(item.poster || item.img || ""),
+      medium: String(item.poster || item.img || ""),
+    },
+    bannerImage: item.poster || item.img ? String(item.poster || item.img) : null,
+    description: item.description ? String(item.description) : "No description provided.",
+    episodes: Number(typeof item.episodes === "object" ? item.episodes?.sub : item.episodes || 0),
+    status: "Unknown",
+    genres: [],
+  }));
+}
